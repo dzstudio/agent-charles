@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Agent Charles favicon">
+  <defs>
+    <linearGradient id="lamp-blue" x1="10" y1="52" x2="54" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0e7490"/>
+      <stop offset="0.5" stop-color="#0284c7"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="30" y1="8" x2="42" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dbeafe"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#071522"/>
+  <path
+    d="M17 38c3.5 8.5 9.8 12 19.5 12 8.8 0 15.1-4.1 18.5-11.6-6.3 2.2-12.6 2.5-19 .9-6.9-1.7-13.2-2.1-19-.3Z"
+    fill="url(#lamp-blue)"
+  />
+  <path
+    d="M19 37.8c2.8-6.1 8.1-9.3 15.8-9.3 7.5 0 13 3.1 16.3 9.2"
+    fill="none"
+    stroke="#bae6fd"
+    stroke-width="3"
+    stroke-linecap="round"
+  />
+  <path
+    d="M18 39c-5.4.1-8.9-1.4-10.4-4.4 3.5-.5 6.7.2 9.7 2.1"
+    fill="none"
+    stroke="#38bdf8"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M50.6 37.8c4.5-3.9 8.2-4.7 11-2.3-2.6 4.2-6.6 5.7-12 4.5"
+    fill="none"
+    stroke="#38bdf8"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M29 28.9c1-4 3.2-6 6.6-6 3.2 0 5.1 2 5.8 6"
+    fill="none"
+    stroke="#7dd3fc"
+    stroke-width="3"
+    stroke-linecap="round"
+  />
+  <path
+    d="M35 21c.7-5 3.2-8.1 7.5-9.2-1 4.6-.2 8 2.4 10.1-4.4 1-7.7.7-9.9-.9Z"
+    fill="url(#glow)"
+  />
+  <path
+    d="M25 51h23"
+    stroke="#93c5fd"
+    stroke-width="3"
+    stroke-linecap="round"
+  />
+</svg>
