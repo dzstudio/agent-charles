@@ -35,6 +35,7 @@ Open:
 ```text
 http://127.0.0.1:4317
 ```
+<img width="1551" height="1005" alt="screenshot" src="https://github.com/user-attachments/assets/3b288e10-88ef-4076-b5d3-f250b1280bf8" />
 
 ## First Use
 
