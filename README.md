@@ -1,14 +1,16 @@
 # Agent Charles
 
-Local Anthropic Messages API capture proxy with a Charles-style web UI.
+Local AI agent API capture proxy with a Charles-style web UI.
+
+Translations: [中文](README.zh.md) · [Русский](README.ru.md) · [Español](README.es.md) · [العربية](README.ar.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Português](README.pt.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
 
 ## What it does
 
 - Runs a local proxy at `http://127.0.0.1:4317`.
 - Serves the web UI at `http://127.0.0.1:4317`.
-- Captures Claude Code calls to `/v1/messages`.
+- Captures AI agent API calls through a local proxy.
 - Records request JSON, response JSON, SSE stream events, extracted messages, status, duration, model, and token usage.
-- Lets you configure upstream `base_url`, `api_key`, API version, auth header, and Claude Code integration from the UI.
+- Lets you configure upstream `base_url`, `api_key`, API version, auth header, and agent integrations from the UI.
 
 ## Install
 
@@ -37,7 +39,7 @@ http://127.0.0.1:4317
 ## First Use
 
 1. Open the UI.
-2. In `Provider`, set:
+2. In `LLM Provider`, set:
    - `Base URL`: usually `https://api.anthropic.com`
    - `API Key`: your Anthropic API key
    - `Default Model`: optional
@@ -62,7 +64,7 @@ The real API key is stored only in Agent Charles' local database:
 ~/.agent-charles/agent-charles.db
 ```
 
-Before enabling, the full `~/.claude/settings.json` file is backed up to:
+Before starting Claude Code capture, the full `~/.claude/settings.json` file is backed up to:
 
 ```text
 ~/.claude/settings.agent-charles.backup.json
@@ -88,7 +90,7 @@ The Vite dev server runs at `http://127.0.0.1:4318` and proxies `/api` and `/v1`
 
 ## Current Scope
 
-- Anthropic-compatible Messages API only.
+- Anthropic Messages API and OpenAI-compatible `/v1` proxy flows.
 - Local API key mode only.
 - No HTTPS MITM.
 - API key is stored locally in SQLite for the MVP; a later version should use macOS Keychain or another OS secret store.

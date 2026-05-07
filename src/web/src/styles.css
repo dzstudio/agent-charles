@@ -300,6 +300,16 @@ button:hover {
   flex-shrink: 0;
 }
 
+.language-select {
+  width: 128px;
+  height: 34px;
+  border: 1px solid #c9d2dc;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #fff;
+  color: #17202a;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 1fr 340px;

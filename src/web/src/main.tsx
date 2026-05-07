@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { copy } from "./copy";
+import { copy, languageOptions, setCopyLanguage, storedLanguage, type LanguageCode } from "./copy";
 import "./styles.css";
 
 type CaptureSummary = {
@@ -81,6 +81,9 @@ function App() {
   const [settingsWidth, setSettingsWidth] = useState(() => storedNumber("agent-charles-settings-width", 340, 280, 620));
   const [settingsCollapsed, setSettingsCollapsed] = useState(() => storedBoolean("agent-charles-settings-collapsed", true));
   const [theme, setTheme] = useState<ThemeMode>(() => storedTheme());
+  const [language, setLanguage] = useState<LanguageCode>(() => storedLanguage());
+
+  setCopyLanguage(language);
 
   async function refreshCaptures() {
     const rows = await api<CaptureSummary[]>("/api/captures");
@@ -109,6 +112,11 @@ function App() {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("agent-charles-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    setCopyLanguage(language);
+    window.localStorage.setItem("agent-charles-language", language);
+  }, [language]);
 
   useEffect(() => {
     window.localStorage.setItem("agent-charles-settings-collapsed", String(settingsCollapsed));
@@ -280,6 +288,17 @@ function App() {
           </div>
           <div className="topbar-actions">
             {notice && <output>{notice}</output>}
+            <select
+              className="language-select"
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as LanguageCode)}
+              title={copy.tooltips.language}
+              aria-label={copy.tooltips.language}
+            >
+              {languageOptions.map((option) => (
+                <option key={option.code} value={option.code}>{option.label}</option>
+              ))}
+            </select>
             <button
               className="icon-button theme-toggle"
               onClick={toggleTheme}
