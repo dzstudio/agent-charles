@@ -13,11 +13,14 @@ export function normalizeClaudeSettingsPath(settingsPath: string) {
 }
 
 export function claudeBackupPath(settingsPath: string) {
+  if (!settingsPath) return "";
   return join(dirname(settingsPath), "settings.agent-charles.backup.json");
 }
 
 export function getClaudeIntegrationStatus(proxyUrl: string, configuredSettingsPath?: string | null) {
-  const settingsPath = normalizeClaudeSettingsPath(configuredSettingsPath ?? defaultClaudeSettingsPath);
+  const settingsPath = configuredSettingsPath
+    ? normalizeClaudeSettingsPath(configuredSettingsPath)
+    : existsSync(defaultClaudeSettingsPath) ? defaultClaudeSettingsPath : "";
   const backupPath = claudeBackupPath(settingsPath);
   const settings = readSettings(settingsPath);
   const env = isRecord(settings.env) ? settings.env : {};

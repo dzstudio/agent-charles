@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   claudeBackupPath,
   defaultClaudeSettingsPath,
@@ -29,7 +30,7 @@ export const agentDefinitions = [
   { id: "claude-code", name: "Claude Code", kind: "claude", defaultPath: defaultClaudeSettingsPath, supported: true },
   { id: "codex-cli", name: "CodeX CLI", kind: "codex", defaultPath: join(homedir(), ".codex", "config.toml"), supported: true },
   { id: "openai-codex", name: "OpenAI CodeX", kind: "codex", defaultPath: join(homedir(), ".codex", "config.toml"), supported: true },
-  { id: "openclaw", name: "OpenClaw", kind: "openclaw", defaultPath: join(homedir(), ".openclaw", "openclaw.yaml"), supported: true },
+  { id: "openclaw", name: "OpenClaw", kind: "openclaw", defaultPath: join(homedir(), ".openclaw", "openclaw.json"), supported: true },
   { id: "hermes", name: "Hermes", kind: "hermes", defaultPath: join(homedir(), ".clanker.yaml"), supported: true }
 ] as const;
 
@@ -41,7 +42,7 @@ export function getAgentIntegration(id: string, proxyUrl: string, configuredPath
       id: def.id,
       name: def.name,
       supported: true,
-      ...getClaudeIntegrationStatus(proxyUrl, configuredPath ?? def.defaultPath)
+      ...getClaudeIntegrationStatus(proxyUrl, configuredPath)
     };
   }
   if (def.kind === "codex") {
@@ -60,8 +61,10 @@ export function getAgentIntegration(id: string, proxyUrl: string, configuredPath
     };
   }
   if (def.kind === "openclaw" || def.kind === "hermes") {
-    const settingsPath = existingOrConfiguredPath(configuredPath, def.defaultPath);
-    const backupPath = yamlBackupPath(settingsPath, def.id);
+    const settingsPath = def.kind === "openclaw"
+      ? existingOpenClawPath(configuredPath, def.defaultPath)
+      : existingOrConfiguredPath(configuredPath, def.defaultPath);
+    const backupPath = configBackupPath(settingsPath, def.id);
     const text = existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : "";
     return {
       id: def.id,
@@ -69,11 +72,16 @@ export function getAgentIntegration(id: string, proxyUrl: string, configuredPath
       supported: true,
       settingsPath,
       backupPath,
-      enabled: text.includes(managedStart) && text.includes(`base_url: "${proxyUrl}/v1"`),
+      enabled: text.includes(managedStart) && (
+        text.includes(`baseUrl: "${proxyUrl}/v1"`) ||
+        text.includes(`"baseUrl": "${proxyUrl}/v1"`) ||
+        text.includes(`base_url: "${proxyUrl}/v1"`) ||
+        text.includes(`"base_url": "${proxyUrl}/v1"`)
+      ),
       currentBaseUrl: text.includes(managedStart) ? `${proxyUrl}/v1` : "",
       hasBackup: existsSync(backupPath),
       notes: def.kind === "openclaw"
-        ? "Writes an Agent Charles OpenAI-compatible provider into openclaw.yaml. Restart OpenClaw after changing this."
+        ? "Writes an Agent Charles OpenAI-compatible provider into openclaw.json. OpenClaw only needs the Agent Charles baseUrl; configure the real upstream API key in Agent Charles. Restart OpenClaw after changing this."
         : "Writes hermes.base_url into .clanker.yaml. Restart Clanker/Hermes after changing this."
     };
   }
@@ -99,7 +107,7 @@ export function enableAgentIntegration(id: string, proxyUrl: string, configuredP
   if (def.kind === "openclaw" || def.kind === "hermes") {
     const settingsPath = normalizeConfigPath(configuredPath || "");
     assertSettingsPath(settingsPath, def.name);
-    const backupPath = yamlBackupPath(settingsPath, def.id);
+    const backupPath = configBackupPath(settingsPath, def.id);
     mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 });
     if (!existsSync(backupPath)) {
       writeFileSync(backupPath, existsSync(settingsPath) ? readFileSync(settingsPath) : "");
@@ -132,7 +140,7 @@ export function disableAgentIntegration(id: string, proxyUrl: string, configured
   if (def.kind === "openclaw" || def.kind === "hermes") {
     const settingsPath = normalizeConfigPath(configuredPath || "");
     assertSettingsPath(settingsPath, def.name);
-    const backupPath = yamlBackupPath(settingsPath, def.id);
+    const backupPath = configBackupPath(settingsPath, def.id);
     if (existsSync(backupPath)) {
       copyFileSync(backupPath, settingsPath);
     } else if (existsSync(settingsPath)) {
@@ -154,7 +162,7 @@ export function backupPathForAgent(id: string, settingsPath: string) {
   const def = agentDefinitions.find((item) => item.id === id);
   if (!def) throw new Error(`Unknown agent: ${id}`);
   if (def.kind === "claude") return claudeBackupPath(settingsPath);
-  if (def.kind === "openclaw" || def.kind === "hermes") return yamlBackupPath(settingsPath, id);
+  if (def.kind === "openclaw" || def.kind === "hermes") return configBackupPath(settingsPath, id);
   return codexBackupPath(settingsPath, id);
 }
 
@@ -171,6 +179,35 @@ function existingOrConfiguredPath(configuredPath: string | null | undefined, def
   return existsSync(defaultPath) ? normalizeConfigPath(defaultPath) : "";
 }
 
+function existingOpenClawPath(configuredPath: string | null | undefined, defaultPath: string) {
+  if (configuredPath) return normalizeConfigPath(configuredPath);
+  const cliPath = openClawConfigFile();
+  if (cliPath && existsSync(cliPath)) return cliPath;
+  const candidates = [
+    process.env.OPENCLAW_CONFIG,
+    defaultPath,
+    join(homedir(), ".config", "openclaw", "openclaw.json"),
+    "/etc/openclaw/openclaw.json",
+    join(homedir(), ".openclaw", "openclaw.yaml")
+  ].filter(Boolean) as string[];
+  const found = candidates.map(normalizeConfigPath).find((path) => existsSync(path));
+  return found ?? "";
+}
+
+function openClawConfigFile() {
+  try {
+    const output = execFileSync("openclaw", ["config", "file"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1500
+    }).trim();
+    const path = output.match(/(?:~|\/)[^\r\n]+/)?.[0] ?? output.split(/\r?\n/).at(-1) ?? "";
+    return path ? normalizeConfigPath(path) : "";
+  } catch {
+    return "";
+  }
+}
+
 function assertSettingsPath(settingsPath: string, agentName: string) {
   if (!settingsPath) throw new Error(`${agentName} settings path is required before starting.`);
 }
@@ -180,9 +217,10 @@ function codexBackupPath(settingsPath: string, id: string) {
   return join(dirname(settingsPath), `config.agent-charles.${id}.backup.toml`);
 }
 
-function yamlBackupPath(settingsPath: string, id: string) {
+function configBackupPath(settingsPath: string, id: string) {
   if (!settingsPath) return "";
-  return join(dirname(settingsPath), `${id}.agent-charles.backup.yaml`);
+  const extension = settingsPath.endsWith(".json") ? "json" : "yaml";
+  return join(dirname(settingsPath), `${id}.agent-charles.backup.${extension}`);
 }
 
 function applyCodexManagedBlock(config: string, proxyUrl: string) {
@@ -207,18 +245,26 @@ function removeCodexManagedBlock(config: string) {
 function applyOpenClawManagedBlock(config: string, proxyUrl: string) {
   const withoutManaged = removeManagedBlock(config).trimEnd();
   const block = [
-    managedStart,
-    "models:",
-    "  agent_charles:",
-    '    api_key: "agent-charles-placeholder"',
-    `    base_url: "${proxyUrl}/v1"`,
-    '    default_model: "gpt-4o"',
+    `// ${managedStart}`,
+    "models: {",
+    '  mode: "merge",',
+    "  providers: {",
+    '    "agent-charles": {',
+    `      baseUrl: "${proxyUrl}/v1",`,
+    '      api: "openai-completions",',
+    "      models: [",
+    '        { id: "agent-charles/gpt-4o", name: "Agent Charles", reasoning: false, input: ["text"] }',
+    "      ]",
+    "    }",
+    "  }",
+    "},",
     "",
-    "# To route an OpenClaw agent through Agent Charles, set that agent's model to:",
-    "#   agent_charles/gpt-4o",
-    managedEnd
+    "// To route an OpenClaw agent through Agent Charles, set that agent's model to:",
+    '//   "agent-charles/gpt-4o"',
+    "// OpenClaw does not need a real API key for Agent Charles; configure the upstream key in Agent Charles.",
+    `// ${managedEnd}`
   ].join("\n");
-  return `${withoutManaged}\n\n${block}\n`;
+  return appendJson5TopLevelBlock(withoutManaged, block);
 }
 
 function applyHermesManagedBlock(config: string, proxyUrl: string) {
@@ -235,8 +281,24 @@ function applyHermesManagedBlock(config: string, proxyUrl: string) {
 }
 
 function removeManagedBlock(config: string) {
-  const pattern = new RegExp(`\\n?${escapeRegex(managedStart)}[\\s\\S]*?${escapeRegex(managedEnd)}\\n?`, "g");
+  const pattern = new RegExp(`\\n?(?://\\s*)?${escapeRegex(managedStart)}[\\s\\S]*?(?://\\s*)?${escapeRegex(managedEnd)}\\n?`, "g");
   return config.replace(pattern, "\n");
+}
+
+function appendJson5TopLevelBlock(config: string, block: string) {
+  const trimmed = config.trim();
+  if (!trimmed) return `{\n${indent(block, 2)}\n}\n`;
+  const closeIndex = trimmed.lastIndexOf("}");
+  if (closeIndex === -1) return `${trimmed}\n\n${block}\n`;
+  const before = trimmed.slice(0, closeIndex).trimEnd();
+  const after = trimmed.slice(closeIndex);
+  const needsComma = !before.endsWith("{") && !before.endsWith(",");
+  return `${before}${needsComma ? "," : ""}\n${indent(block, 2)}\n${after}\n`;
+}
+
+function indent(value: string, spaces: number) {
+  const prefix = " ".repeat(spaces);
+  return value.split("\n").map((line) => line ? `${prefix}${line}` : line).join("\n");
 }
 
 function setTopLevelString(config: string, key: string, value: string) {

@@ -12,7 +12,7 @@ export function redactHeaders(headers: Record<string, string | string[] | undefi
   for (const [key, value] of Object.entries(headers)) {
     if (value === undefined) continue;
     const lower = key.toLowerCase();
-    if (["x-api-key", "authorization", "proxy-authorization", "cookie"].includes(lower)) {
+    if (["x-api-key", "api-key", "authorization", "proxy-authorization", "cookie"].includes(lower)) {
       result[key] = "[redacted]";
     } else {
       result[key] = value;
@@ -55,6 +55,13 @@ export function extractRequestMessages(body: unknown) {
 
 export function extractResponseMessages(body: unknown, startOrd: number) {
   if (!isRecord(body)) return [];
+  if (Array.isArray(body.choices)) {
+    const first = body.choices.find(isRecord);
+    if (first && isRecord(first.message)) {
+      const text = contentToText(first.message.content as AnthropicContent);
+      if (text) return [{ role: "assistant", contentType: "text", text, ord: startOrd }];
+    }
+  }
   const text = contentToText(body.content as AnthropicContent);
   if (!text) return [];
   return [{ role: "assistant", contentType: "text", text, ord: startOrd }];
@@ -74,6 +81,12 @@ export function requestSummary(body: unknown) {
 
 export function usageFromResponse(body: unknown) {
   if (!isRecord(body) || !isRecord(body.usage)) return {};
+  if ("prompt_tokens" in body.usage || "completion_tokens" in body.usage) {
+    return {
+      inputTokens: numberOrNull(body.usage.prompt_tokens),
+      outputTokens: numberOrNull(body.usage.completion_tokens)
+    };
+  }
   return {
     inputTokens: numberOrNull(body.usage.input_tokens),
     outputTokens: numberOrNull(body.usage.output_tokens)

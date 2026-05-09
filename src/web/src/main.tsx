@@ -674,7 +674,7 @@ function CodeBlock({ value, title, tone, compact }: { value: string; title?: str
 }
 
 async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const res = await fetch(path.replace(/^\//, ""), init);
   if (!res.ok) throw new Error(await res.text());
   return res.json() as Promise<T>;
 }

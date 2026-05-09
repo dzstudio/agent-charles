@@ -125,7 +125,11 @@ app.all("/v1/*", async (request, reply) => {
   storage.addMessages(id, requestMessages);
 
   const provider = storage.getProviderConfig();
-  const targetUrl = upstreamUrl(provider.baseUrl, path);
+  const translation = openAiChatCompletionToAnthropic(path, requestRecord, provider);
+  const upstreamPath = translation?.path ?? path;
+  const upstreamBodyText = translation ? JSON.stringify(translation.body) : bodyText;
+  const upstreamBodyBuffer = Buffer.from(upstreamBodyText);
+  const targetUrl = upstreamUrl(provider.baseUrl, upstreamPath);
   if (!provider.apiKey) {
     const message = "Provider API key is not configured in Agent Charles UI.";
     storage.finishCapture({
@@ -142,8 +146,8 @@ app.all("/v1/*", async (request, reply) => {
   try {
     upstreamResponse = await fetch(targetUrl, {
       method,
-      headers: buildUpstreamHeaders(request.headers, provider, bodyBuffer.length),
-      body: method === "GET" || method === "HEAD" ? undefined : bodyBuffer as unknown as BodyInit
+      headers: buildUpstreamHeaders(request.headers, provider, upstreamBodyBuffer.length),
+      body: method === "GET" || method === "HEAD" ? undefined : upstreamBodyBuffer as unknown as BodyInit
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -160,7 +164,18 @@ app.all("/v1/*", async (request, reply) => {
   const responseHeadersJson = JSON.stringify(headersToObject(upstreamResponse.headers), null, 2);
   const contentType = upstreamResponse.headers.get("content-type") ?? "";
 
-  if (stream || contentType.includes("text/event-stream")) {
+  if (translation && contentType.includes("text/event-stream")) {
+    await proxyOpenAiChatCompletionStream(reply, upstreamResponse, {
+      id,
+      startedMs,
+      responseHeadersJson,
+      requestMessageCount: requestMessages.length,
+      model: translation.responseModel
+    });
+    return;
+  }
+
+  if (contentType.includes("text/event-stream")) {
     await proxyStream(reply, upstreamResponse, {
       id,
       startedMs,
@@ -171,20 +186,27 @@ app.all("/v1/*", async (request, reply) => {
   }
 
   const responseText = await upstreamResponse.text();
-  const responseJson = safeJsonParse(responseText);
+  const translatedResponse = translation
+    ? JSON.stringify(anthropicToOpenAiChatCompletion(safeJsonParse(responseText), translation.responseModel), null, 2)
+    : responseText;
+  const responseJson = safeJsonParse(translatedResponse);
   storage.addMessages(id, extractResponseMessages(responseJson, requestMessages.length));
   const usage = usageFromResponse(responseJson);
   storage.finishCapture({
     id,
     status: upstreamResponse.status,
     startedMs,
-    responseJson: responseText,
+    responseJson: translatedResponse,
     responseHeadersJson,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens
   });
 
   reply.code(upstreamResponse.status);
+  if (translation) {
+    reply.header("content-type", "application/json");
+    return reply.send(translatedResponse);
+  }
   copyHeaders(reply, upstreamResponse.headers);
   return reply.send(responseText);
 });
@@ -216,6 +238,9 @@ function publicProvider(config: ProviderConfig) {
 
 function upstreamUrl(baseUrl: string, path: string) {
   const base = normalizeBaseUrl(baseUrl);
+  if (base.endsWith("/v1") && path.startsWith("/v1/")) {
+    return `${base}${path.slice(3)}`;
+  }
   return `${base}${path}`;
 }
 
@@ -233,12 +258,14 @@ function buildUpstreamHeaders(
   const headers = new Headers();
   for (const [key, value] of Object.entries(incoming)) {
     const lower = key.toLowerCase();
-    if (["host", "content-length", "x-api-key", "authorization", "connection", "accept-encoding"].includes(lower)) continue;
+    if (["host", "content-length", "x-api-key", "api-key", "authorization", "proxy-authorization", "connection", "accept-encoding"].includes(lower)) continue;
     if (Array.isArray(value)) headers.set(key, value.join(", "));
     else if (value !== undefined) headers.set(key, value);
   }
   headers.set("content-length", String(bodyLength));
-  headers.set("anthropic-version", provider.apiVersion || headers.get("anthropic-version") || "2023-06-01");
+  if (isAnthropicBaseUrl(provider.baseUrl)) {
+    headers.set("anthropic-version", provider.apiVersion || headers.get("anthropic-version") || "2023-06-01");
+  }
   if (provider.authHeader === "authorization") {
     headers.set("authorization", `Bearer ${provider.apiKey}`);
   } else {
@@ -248,6 +275,257 @@ function buildUpstreamHeaders(
     if (key.trim() && value.trim()) headers.set(key.trim(), value.trim());
   }
   return headers;
+}
+
+function openAiChatCompletionToAnthropic(path: string, body: Record<string, unknown>, provider: ProviderConfig) {
+  const pathname = path.split("?")[0];
+  if (pathname !== "/v1/chat/completions" || !isAnthropicBaseUrl(provider.baseUrl)) return null;
+  const requestedModel = typeof body.model === "string" ? body.model : "";
+  const responseModel = provider.defaultModel || requestedModel.replace(/^agent-charles\//, "") || requestedModel;
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const system: string[] = [];
+  const anthropicMessages: Array<Record<string, unknown>> = [];
+
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const role = typeof message.role === "string" ? message.role : "user";
+    if (role === "system" || role === "developer") {
+      const text = openAiContentToText(message.content);
+      if (text) system.push(text);
+      continue;
+    }
+    if (role === "tool") {
+      anthropicMessages.push({
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: typeof message.tool_call_id === "string" ? message.tool_call_id : crypto.randomUUID(),
+          content: openAiContentToText(message.content)
+        }]
+      });
+      continue;
+    }
+    const content = openAiMessageToAnthropicContent(message);
+    if (content.length) {
+      anthropicMessages.push({ role: role === "assistant" ? "assistant" : "user", content });
+    }
+  }
+
+  const anthropicBody: Record<string, unknown> = {
+    model: responseModel,
+    max_tokens: numberOrDefault(body.max_tokens, numberOrDefault(body.max_completion_tokens, 4096)),
+    messages: anthropicMessages,
+    stream: body.stream === true
+  };
+  if (system.length) anthropicBody.system = system.join("\n\n");
+  if (typeof body.temperature === "number") anthropicBody.temperature = body.temperature;
+  if (typeof body.top_p === "number") anthropicBody.top_p = body.top_p;
+  if (Array.isArray(body.stop)) anthropicBody.stop_sequences = body.stop;
+  if (typeof body.stop === "string") anthropicBody.stop_sequences = [body.stop];
+  if (Array.isArray(body.tools)) {
+    const tools = body.tools.map(openAiToolToAnthropic).filter(Boolean);
+    if (tools.length) anthropicBody.tools = tools;
+  }
+
+  return { path: "/v1/messages", body: anthropicBody, responseModel };
+}
+
+function openAiMessageToAnthropicContent(message: Record<string, unknown>) {
+  const content: Array<Record<string, unknown>> = [];
+  const text = openAiContentToText(message.content);
+  if (text) content.push({ type: "text", text });
+  if (Array.isArray(message.tool_calls)) {
+    for (const call of message.tool_calls) {
+      if (!isRecord(call) || !isRecord(call.function)) continue;
+      content.push({
+        type: "tool_use",
+        id: typeof call.id === "string" ? call.id : crypto.randomUUID(),
+        name: typeof call.function.name === "string" ? call.function.name : "tool",
+        input: safeJsonParse(typeof call.function.arguments === "string" ? call.function.arguments : "{}") ?? {}
+      });
+    }
+  }
+  return content;
+}
+
+function openAiContentToText(content: unknown) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((item) => {
+    if (!isRecord(item)) return "";
+    if (item.type === "text" && typeof item.text === "string") return item.text;
+    if (typeof item.content === "string") return item.content;
+    return "";
+  }).filter(Boolean).join("\n\n");
+}
+
+function openAiToolToAnthropic(tool: unknown) {
+  if (!isRecord(tool) || tool.type !== "function" || !isRecord(tool.function)) return null;
+  const name = typeof tool.function.name === "string" ? tool.function.name : "";
+  if (!name) return null;
+  return {
+    name,
+    description: typeof tool.function.description === "string" ? tool.function.description : "",
+    input_schema: isRecord(tool.function.parameters) ? tool.function.parameters : { type: "object", properties: {} }
+  };
+}
+
+function anthropicToOpenAiChatCompletion(body: unknown, model: string) {
+  if (!isRecord(body) || !Array.isArray(body.content)) return body;
+  const toolCalls = body.content
+    .filter((item): item is Record<string, unknown> => isRecord(item) && item.type === "tool_use")
+    .map((item) => ({
+      id: typeof item.id === "string" ? item.id : crypto.randomUUID(),
+      type: "function",
+      function: {
+        name: typeof item.name === "string" ? item.name : "tool",
+        arguments: JSON.stringify(item.input ?? {})
+      }
+    }));
+  const text = body.content
+    .filter((item): item is Record<string, unknown> => isRecord(item) && item.type === "text" && typeof item.text === "string")
+    .map((item) => item.text)
+    .join("");
+  return {
+    id: typeof body.id === "string" ? body.id : `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{
+      index: 0,
+      message: {
+        role: "assistant",
+        content: text || null,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {})
+      },
+      finish_reason: anthropicStopReasonToOpenAi(body.stop_reason)
+    }],
+    usage: anthropicUsageToOpenAi(body.usage)
+  };
+}
+
+async function proxyOpenAiChatCompletionStream(
+  reply: FastifyReply,
+  upstreamResponse: Response,
+  input: { id: string; startedMs: number; responseHeadersJson: string; requestMessageCount: number; model: string }
+) {
+  reply.code(upstreamResponse.status);
+  reply.header("content-type", "text/event-stream");
+  reply.header("cache-control", "no-cache");
+  reply.raw.writeHead(upstreamResponse.status, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache"
+  });
+  const accumulator = new AnthropicSseAccumulator();
+  const outEvents: string[] = [];
+  try {
+    if (!upstreamResponse.body) throw new Error("Upstream stream is empty");
+    const reader = upstreamResponse.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const text = decoder.decode(value, { stream: true });
+      accumulator.push(text);
+      for (const event of anthropicSseChunkToOpenAi(text, input.model)) {
+        outEvents.push(event);
+        reply.raw.write(`data: ${event}\n\n`);
+      }
+    }
+    accumulator.push(decoder.decode());
+    accumulator.finish();
+    reply.raw.write("data: [DONE]\n\n");
+    if (accumulator.assistantText) {
+      storage.addMessages(input.id, [{
+        role: "assistant",
+        contentType: "text",
+        text: accumulator.assistantText,
+        ord: input.requestMessageCount
+      }]);
+    }
+    storage.finishCapture({
+      id: input.id,
+      status: upstreamResponse.status,
+      startedMs: input.startedMs,
+      responseJson: JSON.stringify(buildStreamResponse(upstreamResponse.status, accumulator), null, 2),
+      responseHeadersJson: input.responseHeadersJson,
+      sseEventsJsonl: outEvents.join("\n"),
+      inputTokens: accumulator.inputTokens,
+      outputTokens: accumulator.outputTokens
+    });
+  } catch (error) {
+    storage.finishCapture({
+      id: input.id,
+      status: upstreamResponse.status,
+      startedMs: input.startedMs,
+      responseJson: JSON.stringify(buildStreamResponse(upstreamResponse.status, accumulator, error), null, 2),
+      responseHeadersJson: input.responseHeadersJson,
+      sseEventsJsonl: outEvents.join("\n"),
+      error: error instanceof Error ? error.message : String(error)
+    });
+  } finally {
+    reply.raw.end();
+  }
+}
+
+function anthropicSseChunkToOpenAi(chunk: string, model: string) {
+  const events: string[] = [];
+  for (const line of chunk.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trimStart();
+    if (!data || data === "[DONE]") continue;
+    const parsed = safeJsonParse(data);
+    if (!isRecord(parsed)) continue;
+    if (parsed.type === "content_block_delta" && isRecord(parsed.delta) && parsed.delta.type === "text_delta" && typeof parsed.delta.text === "string") {
+      events.push(JSON.stringify(openAiStreamChunk(model, { content: parsed.delta.text })));
+    }
+    if (parsed.type === "message_delta") {
+      events.push(JSON.stringify(openAiStreamChunk(model, {}, anthropicStopReasonToOpenAi(parsed.delta && isRecord(parsed.delta) ? parsed.delta.stop_reason : null))));
+    }
+  }
+  return events;
+}
+
+function openAiStreamChunk(model: string, delta: Record<string, unknown>, finishReason: unknown = null) {
+  return {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }]
+  };
+}
+
+function anthropicUsageToOpenAi(usage: unknown) {
+  if (!isRecord(usage)) return undefined;
+  const promptTokens = numberOrDefault(usage.input_tokens, 0);
+  const completionTokens = numberOrDefault(usage.output_tokens, 0);
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens
+  };
+}
+
+function anthropicStopReasonToOpenAi(value: unknown) {
+  if (value === "end_turn") return "stop";
+  if (value === "max_tokens") return "length";
+  if (value === "tool_use") return "tool_calls";
+  return value ?? null;
+}
+
+function numberOrDefault(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function isAnthropicBaseUrl(baseUrl: string) {
+  try {
+    const url = new URL(normalizeBaseUrl(baseUrl));
+    return url.hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
 }
 
 async function proxyStream(
